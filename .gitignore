@@ -64,6 +64,10 @@ evaluation_results/
 evaluation_results_robustness/
 finetune_results/
 pretrain_results/
+rq2_outputs/
+**/rq2_outputs/
+rq2_prepared_data/
+**/rq2_data/
 robustness_results*.jsonl
 test_result.txt
 
