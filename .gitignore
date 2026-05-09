@@ -82,6 +82,12 @@ test_result.txt
 *.npy
 *.npz
 
+# Keep these lightweight symlinks tracked; the real files live under weights/.
+!TrafficFormer-5x128/models/nomoe_bertflow_pre-trained_model.bin-120000
+!ET-BERT-5x128/models/pre-trained_model.bin
+!YaTC/YaTC_pretrained_model.pth
+!NetMamba/src/pre-train.pth
+
 # Compressed archives
 *.zip
 *.tar
@@ -129,6 +135,12 @@ tmp/
 temp/
 *.tmp
 *.bak
+
+# Centralized local weight store. Copy this directory between machines, but do
+# not commit the actual weight files to GitHub.
+weights/*
+!weights/README.md
+!weights/MANIFEST.tsv
 
 # Nested repositories from imported baselines.
 # Keep source files, but do not commit each upstream repo's git metadata.

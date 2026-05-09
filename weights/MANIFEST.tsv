@@ -1,0 +1,5 @@
+baseline	weight_path	original_path
+TrafficFormer-5x128	weights/TrafficFormer-5x128/nomoe_bertflow_pre-trained_model.bin-120000	TrafficFormer-5x128/models/nomoe_bertflow_pre-trained_model.bin-120000
+ET-BERT-5x128	weights/ET-BERT-5x128/pre-trained_model.bin	ET-BERT-5x128/models/pre-trained_model.bin
+YaTC	weights/YaTC/YaTC_pretrained_model.pth	YaTC/YaTC_pretrained_model.pth
+NetMamba	weights/NetMamba/pre-train.pth	NetMamba/src/pre-train.pth

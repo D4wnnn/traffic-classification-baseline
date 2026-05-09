@@ -1,0 +1,95 @@
+# OS / editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+ENV/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.so
+*.o
+*.a
+*.pyd
+
+# Logs and experiment outputs
+*.log
+logs/
+log/
+runs/
+wandb/
+mlruns/
+events.out.tfevents.*
+eval_logs/
+finetune_results/
+pretrain_results/
+output/
+outputs/
+output_dir/
+checkpoints/
+checkpoint*/
+results/
+
+# Generated traffic datasets and corpora
+data_generation/dataset/
+data_generation/data/
+data_generation_full/dataset/
+data_generation_full/data/
+*.pcap
+*.pcapng
+*.cap
+*.tsv
+*.csv
+*.parquet
+*.arrow
+
+# Model weights and serialized training state
+*.bin
+*.bin-*
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.pkl
+*.pickle
+*.npy
+*.npz
+
+# Keep this lightweight symlink tracked; the real file lives in ../weights/.
+!models/nomoe_bertflow_pre-trained_model.bin-120000
+
+# Archives and extracted junk
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+__MACOSX/
+*/__MACOSX/
+._*
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
