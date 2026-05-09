@@ -1,0 +1,628 @@
+"""
+This script provides an exmaple to wrap UER-py for classification.
+"""
+import random
+import argparse
+import torch
+import torch.nn as nn
+import os
+import sys
+import json
+uer_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(uer_dir)
+from uer.layers import *
+from uer.encoders import *
+from uer.utils.vocab import Vocab
+from uer.utils.constants import *
+from uer.utils import *
+from uer.utils.optimizers import *
+from uer.utils.config import load_hyperparam
+from uer.utils.seed import set_seed
+from uer.model_saver import save_model
+from uer.opts import finetune_opts
+import tqdm
+import numpy as np
+
+class Classifier(nn.Module):
+    def __init__(self, args):
+        super(Classifier, self).__init__()
+        self.embedding = str2embedding[args.embedding](args, len(args.tokenizer.vocab))
+        self.encoder = str2encoder[args.encoder](args)
+        self.labels_num = args.labels_num
+        self.pooling = args.pooling
+        self.soft_targets = args.soft_targets
+        self.soft_alpha = args.soft_alpha
+        self.output_layer_1 = nn.Linear(args.hidden_size, args.hidden_size)
+        self.output_layer_2 = nn.Linear(args.hidden_size, self.labels_num)
+
+    def forward(self, src, tgt, seg, soft_tgt=None):
+        """
+        Args:
+            src: [batch_size x seq_length]
+            tgt: [batch_size]
+            seg: [batch_size x seq_length]
+        """
+        # Embedding.
+        emb = self.embedding(src, seg)
+        # Encoder.
+        output = self.encoder(emb, seg)
+        temp_output = output
+        # Target.
+        if self.pooling == "mean":
+            output = torch.mean(output, dim=1)
+        elif self.pooling == "max":
+            output = torch.max(output, dim=1)[0]
+        elif self.pooling == "last":
+            output = output[:, -1, :]
+        else:
+            output = output[:, 0, :]
+        output = torch.tanh(self.output_layer_1(output))
+        logits = self.output_layer_2(output)
+        if tgt is not None:
+            if self.soft_targets and soft_tgt is not None:
+                loss = self.soft_alpha * nn.MSELoss()(logits, soft_tgt) + \
+                       (1 - self.soft_alpha) * nn.NLLLoss()(nn.LogSoftmax(dim=-1)(logits), tgt.view(-1))
+            else:
+                loss = nn.NLLLoss()(nn.LogSoftmax(dim=-1)(logits), tgt.view(-1))
+            return loss, logits
+        else:
+            return None, logits
+            #return temp_output, logits
+
+
+def count_labels_num(path):
+    labels_set, columns = set(), {}
+    with open(path, mode="r", encoding="utf-8") as f:
+        for line_id, line in enumerate(f):
+            if line_id == 0:
+                for i, column_name in enumerate(line.strip().split("\t")):
+                    columns[column_name] = i
+                continue
+            line = line.strip().split("\t")
+            label = int(line[columns["label"]])
+            labels_set.add(label)
+    if not labels_set:
+        return 0
+    return max(labels_set) + 1
+
+
+def load_or_initialize_parameters(args, model):
+    if args.pretrained_model_path is not None:
+        # Initialize with pretrained model.
+        model.load_state_dict(torch.load(args.pretrained_model_path, map_location={'cuda:1':'cuda:0', 'cuda:2':'cuda:0', 'cuda:3':'cuda:0'}), strict=False)
+    else:
+        # Initialize with normal distribution.
+        for n, p in list(model.named_parameters()):
+            if "gamma" not in n and "beta" not in n:
+                p.data.normal_(0, 0.02)
+
+
+def build_optimizer(args, model):
+    # [修改]：只保留 requires_grad 为 True 的参数
+    param_optimizer = list(filter(lambda p: p[1].requires_grad, model.named_parameters()))
+    
+    no_decay = ['bias', 'gamma', 'beta']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay_rate': 0.01},
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay_rate': 0.0}
+    ]
+    # 下面的代码保持不变...
+    if args.optimizer in ["adamw"]:
+        optimizer = str2optimizer[args.optimizer](optimizer_grouped_parameters, lr=args.learning_rate, correct_bias=False)
+    else:
+        optimizer = str2optimizer[args.optimizer](optimizer_grouped_parameters, lr=args.learning_rate,
+                                                  scale_parameter=False, relative_step=False)
+    # ... Scheduler 部分保持不变 ...
+    if args.scheduler in ["constant"]:
+        scheduler = str2scheduler[args.scheduler](optimizer)
+    elif args.scheduler in ["constant_with_warmup"]:
+        scheduler = str2scheduler[args.scheduler](optimizer, args.train_steps*args.warmup)
+    else:
+        scheduler = str2scheduler[args.scheduler](optimizer, args.train_steps*args.warmup, args.train_steps)
+    return optimizer, scheduler
+
+def batch_loader(batch_size, src, tgt, seg, soft_tgt=None):
+    instances_num = src.size()[0]
+    for i in range(instances_num // batch_size):
+        src_batch = src[i * batch_size : (i + 1) * batch_size, :]
+        tgt_batch = tgt[i * batch_size : (i + 1) * batch_size]
+        seg_batch = seg[i * batch_size : (i + 1) * batch_size, :]
+        if soft_tgt is not None:
+            soft_tgt_batch = soft_tgt[i * batch_size : (i + 1) * batch_size, :]
+            yield src_batch, tgt_batch, seg_batch, soft_tgt_batch
+        else:
+            yield src_batch, tgt_batch, seg_batch, None
+    if instances_num > instances_num // batch_size * batch_size:
+        src_batch = src[instances_num // batch_size * batch_size :, :]
+        tgt_batch = tgt[instances_num // batch_size * batch_size :]
+        seg_batch = seg[instances_num // batch_size * batch_size :, :]
+        if soft_tgt is not None:
+            soft_tgt_batch = soft_tgt[instances_num // batch_size * batch_size :, :]
+            yield src_batch, tgt_batch, seg_batch, soft_tgt_batch
+        else:
+            yield src_batch, tgt_batch, seg_batch, None
+
+
+def read_dataset(args, path):
+    dataset, columns = [], {}
+    with open(path, mode="r", encoding="utf-8") as f:
+        for line_id, line in enumerate(f):
+            if line_id == 0:
+                for i, column_name in enumerate(line.strip().split("\t")):
+                    columns[column_name] = i
+                continue
+            line = line[:-1].split("\t")
+            tgt = int(line[columns["label"]])
+            if args.soft_targets and "logits" in columns.keys():
+                soft_tgt = [float(value) for value in line[columns["logits"]].split(" ")]
+            if "text_b" not in columns:  # Sentence classification.
+                text_a = line[columns["text_a"]]
+                src = args.tokenizer.convert_tokens_to_ids([CLS_TOKEN] + args.tokenizer.tokenize(text_a))
+                seg = [1] * len(src)
+            else:  # Sentence-pair classification.
+                text_a, text_b = line[columns["text_a"]], line[columns["text_b"]]
+                src_a = args.tokenizer.convert_tokens_to_ids([CLS_TOKEN] + args.tokenizer.tokenize(text_a) + [SEP_TOKEN])
+                src_b = args.tokenizer.convert_tokens_to_ids(args.tokenizer.tokenize(text_b) + [SEP_TOKEN])
+                src = src_a + src_b
+                seg = [1] * len(src_a) + [2] * len(src_b)
+
+            if len(src) > args.seq_length:
+                src = src[: args.seq_length]
+                seg = seg[: args.seq_length]
+            while len(src) < args.seq_length:
+                src.append(0)
+                seg.append(0)
+            if args.soft_targets and "logits" in columns.keys():
+                dataset.append((src, tgt, seg, soft_tgt))
+            else:
+                dataset.append((src, tgt, seg))
+
+    return dataset
+
+
+def train_model(args, model, optimizer, scheduler, src_batch, tgt_batch, seg_batch, soft_tgt_batch=None):
+    model.zero_grad()
+
+    src_batch = src_batch.to(args.device)
+    tgt_batch = tgt_batch.to(args.device)
+    seg_batch = seg_batch.to(args.device)
+    if soft_tgt_batch is not None:
+        soft_tgt_batch = soft_tgt_batch.to(args.device)
+
+    loss, _ = model(src_batch, tgt_batch, seg_batch, soft_tgt_batch)
+    if torch.cuda.device_count() > 1:
+        loss = torch.mean(loss)
+
+    if args.fp16:
+        with args.amp.scale_loss(loss, optimizer) as scaled_loss:
+            scaled_loss.backward()
+    else:
+        loss.backward()
+
+    optimizer.step()
+    scheduler.step()
+
+    return loss
+
+# def evaluate(args, dataset, print_confusion_matrix=False):
+#     import torch.distributed as dist
+    
+#     # 判断是否在分布式环境
+#     is_distributed = dist.is_initialized()
+#     is_main_process = not is_distributed or dist.get_rank() == 0
+    
+#     src = torch.LongTensor([sample[0] for sample in dataset])
+#     tgt = torch.LongTensor([sample[1] for sample in dataset])
+#     seg = torch.LongTensor([sample[2] for sample in dataset])
+
+#     batch_size = args.batch_size
+    
+#     correct = 0
+#     confusion = torch.zeros(args.labels_num, args.labels_num, dtype=torch.long)
+
+#     args.model.eval()
+
+#     for i, (src_batch, tgt_batch, seg_batch, _) in enumerate(batch_loader(batch_size, src, tgt, seg)):
+#         src_batch = src_batch.to(args.device)
+#         tgt_batch = tgt_batch.to(args.device)
+#         seg_batch = seg_batch.to(args.device)
+        
+#         with torch.no_grad():
+#             _, logits = args.model(src_batch, tgt_batch, seg_batch)
+        
+#         pred = torch.argmax(nn.Softmax(dim=1)(logits), dim=1)
+#         gold = tgt_batch
+        
+#         for j in range(pred.size()[0]):
+#             confusion[pred[j], gold[j]] += 1
+#         correct += torch.sum(pred == gold).item()
+    
+#     # 汇总所有进程的统计结果
+#     if is_distributed:
+#         correct_tensor = torch.tensor(correct, dtype=torch.long, device=args.device)
+#         confusion = confusion.to(args.device)
+        
+#         dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
+#         dist.all_reduce(confusion, op=dist.ReduceOp.SUM)
+        
+#         correct = correct_tensor.item()
+#         confusion = confusion.cpu()
+    
+#     # 计算各类别和整体指标
+#     eps = 1e-9
+#     precisions = []
+#     recalls = []
+#     f1s = []
+    
+#     for i in range(confusion.size()[0]):
+#         # 每个类别的precision, recall, f1
+#         p = confusion[i, i].item() / (confusion[i, :].sum().item() + eps)
+#         r = confusion[i, i].item() / (confusion[:, i].sum().item() + eps)
+#         f1 = 2 * p * r / (p + r + eps)
+        
+#         precisions.append(p)
+#         recalls.append(r)
+#         f1s.append(f1)
+    
+#     # 计算Macro指标（所有类别的平均）
+#     macro_precision = sum(precisions) / len(precisions)
+#     macro_recall = sum(recalls) / len(recalls)
+#     macro_f1 = sum(f1s) / len(f1s)
+    
+#     # 计算Micro指标
+#     total_tp = confusion.diag().sum().item()
+#     total_samples = confusion.sum().item()
+#     micro_precision = micro_recall = micro_f1 = total_tp / (total_samples + eps)
+    
+#     # 计算准确率
+#     accuracy = correct / len(dataset)
+    
+#     # 只在主进程打印结果
+#     if is_main_process:
+#         print("=" * 60)
+#         print("📊 EVALUATION RESULTS")
+#         print("=" * 60)
+        
+#         # 打印整体指标
+#         print("\n🎯 Overall Metrics:")
+#         print(f"  Accuracy:          {accuracy:.4f} ({correct}/{len(dataset)})")
+#         print(f"  Macro Precision:   {macro_precision:.4f}")
+#         print(f"  Macro Recall:      {macro_recall:.4f}")
+#         print(f"  Macro F1:          {macro_f1:.4f}")
+        
+#         # 打印每个类别的指标
+#         if print_confusion_matrix:
+#             print("\n📋 Confusion Matrix:")
+#             print(confusion)
+            
+#             print("\nPer-Class Metrics:")
+#             print(f"{'Label':<8} {'Precision':<12} {'Recall':<12} {'F1-Score':<12} {'Support':<10}")
+#             print("-" * 60)
+            
+#             for i in range(len(precisions)):
+#                 support = confusion[:, i].sum().item()
+#                 print(f"{i:<8} {precisions[i]:<12.4f} {recalls[i]:<12.4f} "
+#                       f"{f1s[i]:<12.4f} {support:<10}")
+            
+#             print("-" * 60)
+#             print(f"{'Macro avg':<8} {macro_precision:<12.4f} {macro_recall:<12.4f} "
+#                   f"{macro_f1:<12.4f} {len(dataset):<10}")
+#             print(f"{'Micro avg':<8} {micro_precision:<12.4f} {micro_recall:<12.4f} "
+#                   f"{micro_f1:<12.4f} {len(dataset):<10}")
+        
+#         print("=" * 60)
+    
+#     metrics = {
+#         'accuracy': accuracy,
+#         'macro_precision': macro_precision,
+#         'macro_recall': macro_recall,
+#         'macro_f1': macro_f1,
+#         'micro_precision': micro_precision,
+#         'micro_recall': micro_recall,
+#         'micro_f1': micro_f1,
+#         'confusion_matrix': confusion, # Tensor
+#         'per_class_precision': precisions,
+#         'per_class_recall': recalls,
+#         'per_class_f1': f1s
+#     }
+    
+#     return metrics
+
+def evaluate(args, dataset, print_confusion_matrix=False, csv_save_path=None):
+    import torch.distributed as dist
+    import pandas as pd
+    
+    # 判断是否在分布式环境
+    is_distributed = dist.is_initialized()
+    is_main_process = not is_distributed or dist.get_rank() == 0
+    
+    src = torch.LongTensor([sample[0] for sample in dataset])
+    tgt = torch.LongTensor([sample[1] for sample in dataset])
+    seg = torch.LongTensor([sample[2] for sample in dataset])
+
+    batch_size = args.batch_size
+    
+    correct = 0
+    confusion = torch.zeros(args.labels_num, args.labels_num, dtype=torch.long)
+
+    args.model.eval()
+
+    for i, (src_batch, tgt_batch, seg_batch, _) in enumerate(batch_loader(batch_size, src, tgt, seg)):
+        src_batch = src_batch.to(args.device)
+        tgt_batch = tgt_batch.to(args.device)
+        seg_batch = seg_batch.to(args.device)
+        
+        with torch.no_grad():
+            _, logits = args.model(src_batch, tgt_batch, seg_batch)
+        
+        pred = torch.argmax(nn.Softmax(dim=1)(logits), dim=1)
+        gold = tgt_batch
+        
+        for j in range(pred.size()[0]):
+            confusion[pred[j], gold[j]] += 1
+        correct += torch.sum(pred == gold).item()
+    
+    # 汇总所有进程的统计结果
+    if is_distributed:
+        correct_tensor = torch.tensor(correct, dtype=torch.long, device=args.device)
+        confusion = confusion.to(args.device)
+        
+        dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(confusion, op=dist.ReduceOp.SUM)
+        
+        correct = correct_tensor.item()
+        confusion = confusion.cpu()
+    
+    # 计算各类别和整体指标
+    eps = 1e-9
+    precisions = []
+    recalls = []
+    f1s = []
+    
+    for i in range(confusion.size()[0]):
+        # 每个类别的precision, recall, f1
+        p = confusion[i, i].item() / (confusion[i, :].sum().item() + eps)
+        r = confusion[i, i].item() / (confusion[:, i].sum().item() + eps)
+        f1 = 2 * p * r / (p + r + eps)
+        
+        precisions.append(p)
+        recalls.append(r)
+        f1s.append(f1)
+    
+    # 计算Macro指标（所有类别的平均）
+    macro_precision = sum(precisions) / len(precisions)
+    macro_recall = sum(recalls) / len(recalls)
+    macro_f1 = sum(f1s) / len(f1s)
+    
+    # 计算Micro指标
+    total_tp = confusion.diag().sum().item()
+    total_samples = confusion.sum().item()
+    micro_precision = micro_recall = micro_f1 = total_tp / (total_samples + eps)
+    
+    # 计算准确率
+    accuracy = correct / len(dataset)
+    
+    # 生成标签名称列表
+    label_names = [f"Label_{i}" for i in range(args.labels_num)]
+    # 如果有自定义标签映射，可以在这里替换，例如：
+    # label_names = ["Negative", "Positive"] 或从args获取
+    if hasattr(args, 'label_names') and args.label_names is not None:
+        label_names = args.label_names
+    
+    # 只在主进程打印结果
+    if is_main_process:
+        print("=" * 60)
+        print("📊 EVALUATION RESULTS")
+        print("=" * 60)
+        
+        # 打印整体指标
+        print("\n🎯 Overall Metrics:")
+        print(f"  Accuracy:          {accuracy:.4f} ({correct}/{len(dataset)})")
+        print(f"  Macro Precision:   {macro_precision:.4f}")
+        print(f"  Macro Recall:      {macro_recall:.4f}")
+        print(f"  Macro F1:          {macro_f1:.4f}")
+        
+        # 打印每个类别的指标和混淆矩阵
+        if print_confusion_matrix:
+            # 创建带标签的混淆矩阵 DataFrame
+            confusion_df = pd.DataFrame(
+                confusion.numpy(),
+                index=[f"Pred_{name}" for name in label_names],
+                columns=[f"True_{name}" for name in label_names]
+            )
+            
+            print("\n📋 Confusion Matrix (Rows: Predicted, Columns: Actual):")
+            print("-" * 60)
+            
+            # 打印表头
+            header = f"{'':>15}"
+            for name in label_names:
+                header += f" {f'True_{name}':>12}"
+            print(header)
+            print("-" * 60)
+            
+            # 打印每一行
+            for i, pred_name in enumerate(label_names):
+                row = f"{'Pred_' + pred_name:>15}"
+                for j in range(len(label_names)):
+                    row += f" {confusion[i, j].item():>12}"
+                print(row)
+            
+            print("-" * 60)
+            
+            # 保存混淆矩阵到 CSV
+            if csv_save_path is not None:
+                confusion_df.to_csv(csv_save_path)
+                print(f"\n💾 Confusion matrix saved to: {csv_save_path}")
+            
+            print("\nPer-Class Metrics:")
+            print(f"{'Label':<15} {'Precision':<12} {'Recall':<12} {'F1-Score':<12} {'Support':<10}")
+            print("-" * 60)
+            
+            for i in range(len(precisions)):
+                support = confusion[:, i].sum().item()
+                print(f"{label_names[i]:<15} {precisions[i]:<12.4f} {recalls[i]:<12.4f} "
+                      f"{f1s[i]:<12.4f} {support:<10}")
+            
+            print("-" * 60)
+            print(f"{'Macro avg':<15} {macro_precision:<12.4f} {macro_recall:<12.4f} "
+                  f"{macro_f1:<12.4f} {len(dataset):<10}")
+            print(f"{'Micro avg':<15} {micro_precision:<12.4f} {micro_recall:<12.4f} "
+                  f"{micro_f1:<12.4f} {len(dataset):<10}")
+        
+        print("=" * 60)
+    
+    metrics = {
+        'accuracy': accuracy,
+        'macro_precision': macro_precision,
+        'macro_recall': macro_recall,
+        'macro_f1': macro_f1,
+        'micro_precision': micro_precision,
+        'micro_recall': micro_recall,
+        'micro_f1': micro_f1,
+        'confusion_matrix': confusion, # Tensor
+        'per_class_precision': precisions,
+        'per_class_recall': recalls,
+        'per_class_f1': f1s
+    }
+    
+    return metrics
+
+def main():
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    finetune_opts(parser)
+
+    parser.add_argument("--pooling", choices=["mean", "max", "first", "last"], default="first",
+                        help="Pooling type.")
+
+    parser.add_argument("--tokenizer", choices=["bert", "char", "space"], default="bert",
+                        help="Specify the tokenizer."
+                             "Original Google BERT uses bert tokenizer on Chinese corpus."
+                             "Char tokenizer segments sentences into characters."
+                             "Space tokenizer segments sentences into words according to space."
+                             )
+
+    parser.add_argument("--soft_targets", action='store_true',
+                        help="Train model with logits.")
+    parser.add_argument("--soft_alpha", type=float, default=0.5,
+                        help="Weight of the soft targets loss.")
+    parser.add_argument("--freeze_encoder", action='store_true',
+                        help="Freeze the encoder and embedding layers, only train the classifier.")
+    args = parser.parse_args()
+
+    # Load the hyperparameters from the config file.
+    args = load_hyperparam(args)
+    set_seed(args.seed)
+
+    # Count the number of labels.
+    args.labels_num = count_labels_num(args.train_path)
+
+    # Build tokenizer.
+    args.tokenizer = str2tokenizer[args.tokenizer](args)
+
+    # Build classification model.
+    model = Classifier(args)
+
+    # Load or initialize parameters.
+    load_or_initialize_parameters(args, model)
+    if args.freeze_encoder:
+        print(f"❄️ Freezing Encoder and Embedding layers...")
+        for param in model.embedding.parameters():
+            param.requires_grad = False
+        for param in model.encoder.parameters():
+            param.requires_grad = False
+        
+        # 验证一下：打印可训练参数的数量
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        all_params = sum(p.numel() for p in model.parameters())
+        print(f"   Trainable params: {trainable_params} / {all_params} (Ratio: {trainable_params/all_params:.4f})")
+    args.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model = model.to(args.device)
+
+    # Training phase.
+    trainset = read_dataset(args, args.train_path)
+    random.shuffle(trainset)
+    instances_num = len(trainset)
+    batch_size = args.batch_size
+    
+    src = torch.LongTensor([example[0] for example in trainset])
+    tgt = torch.LongTensor([example[1] for example in trainset])
+    seg = torch.LongTensor([example[2] for example in trainset])
+    if args.soft_targets:
+        soft_tgt = torch.FloatTensor([example[3] for example in trainset])
+    else:
+        soft_tgt = None
+
+    args.train_steps = int(instances_num * args.epochs_num / batch_size) + 1
+
+    print("Batch size: ", batch_size)
+    print("The number of training instances:", instances_num)
+
+    optimizer, scheduler = build_optimizer(args, model)
+
+    if args.fp16:
+        try:
+            from apex import amp
+        except ImportError:
+            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
+        model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
+        args.amp = amp
+
+    if torch.cuda.device_count() > 1:
+        print("{} GPUs are available. Let's use them.".format(torch.cuda.device_count()))
+        model = torch.nn.DataParallel(model)
+    args.model = model
+
+    total_loss, result, best_result = 0.0, 0.0, 0.0
+
+    print("Start training.")
+
+    for epoch in tqdm.tqdm(range(1, args.epochs_num + 1)):
+        model.train()
+        for i, (src_batch, tgt_batch, seg_batch, soft_tgt_batch) in enumerate(batch_loader(batch_size, src, tgt, seg, soft_tgt)):
+            loss = train_model(args, model, optimizer, scheduler, src_batch, tgt_batch, seg_batch, soft_tgt_batch)
+            total_loss += loss.item()
+            if (i + 1) % args.report_steps == 0:
+                print("Epoch id: {}, Training steps: {}, Avg loss: {:.3f}".format(epoch, i + 1, total_loss / args.report_steps))
+                total_loss = 0.0
+
+        result = evaluate(args, read_dataset(args, args.dev_path))
+        if result['accuracy'] > best_result:
+            best_result = result['accuracy']
+            save_model(model, args.output_model_path)
+
+    # Evaluation phase.
+    if args.test_path is not None:
+        print("Test set evaluation.")
+        if torch.cuda.device_count() > 1:
+            model.module.load_state_dict(torch.load(args.output_model_path))
+        else:
+            model.load_state_dict(torch.load(args.output_model_path))
+        
+        # 确定输出目录
+        output_dir = os.path.dirname(args.output_model_path)
+        csv_path = os.path.join(output_dir, "confusion_matrix.csv")
+        
+        # [Modified] Capture results with confusion matrix CSV save path
+        test_metrics = evaluate(args, read_dataset(args, args.test_path), True, csv_save_path=csv_path)
+
+        # [Modified] Save results to JSON
+        json_path = os.path.join(output_dir, "test_stats.json")
+
+        # Process metrics for serialization (Convert Tensor to list/int)
+        serializable_metrics = {}
+        for k, v in test_metrics.items():
+            if isinstance(v, torch.Tensor):
+                serializable_metrics[k] = v.tolist()
+            else:
+                serializable_metrics[k] = v
+        
+        with open(json_path, mode="w", encoding="utf-8") as f:
+            json.dump(serializable_metrics, f, indent=2)
+            
+        print(f"Test results saved to: {json_path}")
+        
+
+if __name__ == "__main__":
+    main()

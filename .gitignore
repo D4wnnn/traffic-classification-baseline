@@ -1,0 +1,135 @@
+# OS / editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Local assistant / agent state
+.codex/
+.agents/
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+ENV/
+conda-meta/
+
+# Build and native extension artifacts
+build/
+dist/
+*.egg-info/
+*.so
+*.dylib
+*.dll
+*.o
+*.obj
+*.a
+*.lib
+*.pyd
+*.egg
+*.whl
+
+# Logs and experiment trackers
+*.log
+logs/
+log/
+runs/
+wandb/
+mlruns/
+tensorboard/
+events.out.tfevents.*
+
+# Training outputs, checkpoints, and evaluation artifacts
+output/
+outputs/
+output_dir/
+output_freeze/
+checkpoints/
+checkpoint*/
+results/
+eval_logs/
+evaluation_results/
+evaluation_results_robustness/
+finetune_results/
+pretrain_results/
+robustness_results*.jsonl
+test_result.txt
+
+# Model weights and serialized training state
+*.bin
+*.bin-*
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.pb
+*.pkl
+*.pickle
+*.joblib
+*.npy
+*.npz
+
+# Compressed archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.tar.bz2
+*.tbz2
+*.tar.xz
+*.7z
+*.rar
+*.gz
+__MACOSX/
+*/__MACOSX/
+._*
+
+# Traffic datasets and generated corpora
+ET-BERT-5x128/datasets/
+ET-BERT-5x128/data_process/processed_data/
+ET-BERT-5x128/data_process_full/processed_data/
+TrafficFormer-5x128/data_generation/dataset/
+TrafficFormer-5x128/data_generation/data/
+TrafficFormer-5x128/data_generation_full/dataset/
+TrafficFormer-5x128/data_generation_full/data/
+YaTC/1-data_processing/outputs/
+netFound/data/
+netFound/scripts/others/netfound_ready_dataset/
+netFound/scripts/output_folder/
+netFound/src/train/fwwinetuned_mo2del/
+*.pcap
+*.pcapng
+*.cap
+*.flow
+*.tsv
+*.csv
+*.parquet
+*.arrow
+*.h5
+*.hdf5
+*.lmdb
+*.sqlite
+*.sqlite3
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+
+# Nested repositories from imported baselines.
+# Keep source files, but do not commit each upstream repo's git metadata.
+**/.git/

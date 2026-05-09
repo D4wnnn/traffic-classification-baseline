@@ -1,0 +1,16 @@
+**/.idea
+venv/
+**/cmake-build-debug
+**/.PVS-Studio
+*/**/*.pcap
+*/**/*.pcapng
+*/**/*.so
+data/test/*
+*/**/__pycache__
+*/**/*.c
+build/
+src/pre_process/1_filter
+src/pre_process/3_field_extraction
+models/
+example.log
+**/.env
