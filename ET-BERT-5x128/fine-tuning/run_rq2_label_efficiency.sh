@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$SCRIPT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export CUDA_VISIBLE_DEVICES
 
 DATA_BASE_DIR="${DATA_BASE_DIR:-../data_process/processed_data}"
@@ -19,7 +19,7 @@ PRETRAINED_MODEL_PATH="${PRETRAINED_MODEL_PATH:-../models/pre-trained_model.bin}
 VOCAB_PATH="${VOCAB_PATH:-../models/encryptd_vocab.txt}"
 CONFIG_PATH="${CONFIG_PATH:-../models/bert/base_config.json}"
 EPOCHS="${EPOCHS:-20}"
-BATCH_SIZE="${BATCH_SIZE:-32}"
+BATCH_SIZE="${BATCH_SIZE:-96}"
 SEQ_LENGTH="${SEQ_LENGTH:-512}"
 LR="${LR:-6e-5}"
 SEED="${SEED:-42}"
